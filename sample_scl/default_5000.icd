@@ -1,0 +1,397 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  IEC 61850 ICD File — IEC 61850 MMS Simulator Default Model
+
+  This file defines a single-IED template demonstrating the data model.
+  The runtime server builds 20 such IEDs programmatically (5000+ attributes).
+
+  Compliant with: IEC 61850-6:2009 Ed2 / IEC 61850-6:2019 Ed3
+  Schema: http://www.iec.ch/61850/2003/SCL
+-->
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="SCL_IEC61850_V2007B.xsd"
+     version="2007" revision="B" release="4">
+
+  <Header id="IEC61850-MMS-Simulator-Template" version="1.0" revision="1"
+          toolID="IEC61850-MMS-Sim" nameStructure="IEDName"/>
+
+  <DataTypeTemplates>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: ENS (Enumerated Status)
+         ============================================================ -->
+    <DOType id="ENS_TYPE" cdc="ENS">
+      <DA name="stVal"   bType="Enum"      fc="ST" dchg="true"/>
+      <DA name="q"       bType="Quality"   fc="ST" qchg="true"/>
+      <DA name="t"       bType="Timestamp" fc="ST"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: SPS (Single Point Status)
+         ============================================================ -->
+    <DOType id="SPS_TYPE" cdc="SPS">
+      <DA name="stVal"   bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="q"       bType="Quality"   fc="ST" qchg="true"/>
+      <DA name="t"       bType="Timestamp" fc="ST"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: DPS (Double Point Status)
+         ============================================================ -->
+    <DOType id="DPS_TYPE" cdc="DPS">
+      <DA name="stVal"   bType="Dbpos"     fc="ST" dchg="true"/>
+      <DA name="q"       bType="Quality"   fc="ST" qchg="true"/>
+      <DA name="t"       bType="Timestamp" fc="ST"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: INS (Integer Status)
+         ============================================================ -->
+    <DOType id="INS_TYPE" cdc="INS">
+      <DA name="stVal"   bType="INT32"     fc="ST" dchg="true"/>
+      <DA name="q"       bType="Quality"   fc="ST" qchg="true"/>
+      <DA name="t"       bType="Timestamp" fc="ST"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: MV (Measured Value)
+         ============================================================ -->
+    <DOType id="MV_TYPE" cdc="MV">
+      <DA name="mag"     bType="Struct"    fc="MX" dchg="true" type="AnalogueValue_TYPE"/>
+      <DA name="q"       bType="Quality"   fc="MX" qchg="true"/>
+      <DA name="t"       bType="Timestamp" fc="MX"/>
+      <DA name="units"   bType="Struct"    fc="CF" type="Unit_TYPE"/>
+      <DA name="db"      bType="INT32U"    fc="CF"/>
+      <DA name="zeroDb"  bType="INT32U"    fc="CF"/>
+      <DA name="sVC"     bType="Struct"    fc="CF" type="ScaledValueConfig_TYPE"/>
+      <DA name="rangeC"  bType="Struct"    fc="CF" type="RangeConfig_TYPE"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: CMV (Complex Measured Value — per phase)
+         ============================================================ -->
+    <DOType id="CMV_TYPE" cdc="CMV">
+      <DA name="cVal"    bType="Struct"    fc="MX" dchg="true" type="Vector_TYPE"/>
+      <DA name="q"       bType="Quality"   fc="MX" qchg="true"/>
+      <DA name="t"       bType="Timestamp" fc="MX"/>
+      <DA name="units"   bType="Struct"    fc="CF" type="Unit_TYPE"/>
+      <DA name="db"      bType="INT32U"    fc="CF"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: WYE (Three Phase Y-connected value)
+         ============================================================ -->
+    <DOType id="WYE_TYPE" cdc="WYE">
+      <DA name="phsA"    bType="Struct"    fc="MX" type="CMV_TYPE"/>
+      <DA name="phsB"    bType="Struct"    fc="MX" type="CMV_TYPE"/>
+      <DA name="phsC"    bType="Struct"    fc="MX" type="CMV_TYPE"/>
+      <DA name="neut"    bType="Struct"    fc="MX" type="CMV_TYPE"/>
+      <DA name="net"     bType="Struct"    fc="MX" type="CMV_TYPE"/>
+      <DA name="res"     bType="Struct"    fc="MX" type="CMV_TYPE"/>
+      <DA name="q"       bType="Quality"   fc="MX" qchg="true"/>
+      <DA name="t"       bType="Timestamp" fc="MX"/>
+      <DA name="units"   bType="Struct"    fc="CF" type="Unit_TYPE"/>
+      <DA name="db"      bType="INT32U"    fc="CF"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: DPC (Double Point Controllable)
+         ============================================================ -->
+    <DOType id="DPC_TYPE" cdc="DPC">
+      <DA name="stVal"    bType="Dbpos"       fc="ST" dchg="true"/>
+      <DA name="q"        bType="Quality"     fc="ST" qchg="true"/>
+      <DA name="t"        bType="Timestamp"   fc="ST"/>
+      <DA name="stSeld"   bType="BOOLEAN"     fc="ST"/>
+      <DA name="subEna"   bType="BOOLEAN"     fc="SV"/>
+      <DA name="subVal"   bType="Dbpos"       fc="SV"/>
+      <DA name="subQ"     bType="Quality"     fc="SV"/>
+      <DA name="ctlModel" bType="Enum"        fc="CF"/>
+      <DA name="t"        bType="Timestamp"   fc="CO"/>
+      <DA name="Oper"     bType="Struct"      fc="CO" type="OperDPC_TYPE"/>
+      <DA name="SBO"      bType="VisString64" fc="CO"/>
+      <DA name="SBOw"     bType="Struct"      fc="CO" type="OperDPC_TYPE"/>
+      <DA name="Cancel"   bType="Struct"      fc="CO" type="Cancel_TYPE"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: LPL (Logical node name Plate)
+         ============================================================ -->
+    <DOType id="LPL_TYPE" cdc="LPL">
+      <DA name="vendor"   bType="VisString255" fc="DC"/>
+      <DA name="swRev"    bType="VisString255" fc="DC"/>
+      <DA name="d"        bType="VisString255" fc="DC"/>
+      <DA name="dU"       bType="Unicode255"   fc="DC"/>
+      <DA name="configRev" bType="VisString255" fc="DC"/>
+      <DA name="ldNs"     bType="VisString255" fc="EX"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: ACD (Directional Protection Activation)
+         ============================================================ -->
+    <DOType id="ACD_TYPE" cdc="ACD">
+      <DA name="general"  bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="dirGeneral" bType="Enum"    fc="ST" dchg="true"/>
+      <DA name="phsA"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="phsB"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="phsC"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="neut"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="q"        bType="Quality"   fc="ST" qchg="true"/>
+      <DA name="t"        bType="Timestamp" fc="ST"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: ACT (Protection Activation)
+         ============================================================ -->
+    <DOType id="ACT_TYPE" cdc="ACT">
+      <DA name="general"  bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="phsA"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="phsB"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="phsC"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="neut"     bType="BOOLEAN"   fc="ST" dchg="true"/>
+      <DA name="q"        bType="Quality"   fc="ST" qchg="true"/>
+      <DA name="t"        bType="Timestamp" fc="ST"/>
+    </DOType>
+
+    <!-- ============================================================
+         COMMON DATA CLASS: ING (Integer Setting)
+         ============================================================ -->
+    <DOType id="ING_TYPE" cdc="ING">
+      <DA name="setVal"   bType="INT32"     fc="SG" dchg="true"/>
+      <DA name="minVal"   bType="INT32"     fc="SG"/>
+      <DA name="maxVal"   bType="INT32"     fc="SG"/>
+      <DA name="stepSize" bType="INT32U"    fc="SG"/>
+      <DA name="units"    bType="Struct"    fc="CF" type="Unit_TYPE"/>
+      <DA name="d"        bType="VisString255" fc="DC"/>
+    </DOType>
+
+    <!-- ============================================================
+         DAType definitions
+         ============================================================ -->
+    <DAType id="AnalogueValue_TYPE">
+      <BDA name="f"       bType="FLOAT32"/>
+    </DAType>
+
+    <DAType id="Vector_TYPE">
+      <BDA name="mag"     bType="Struct"  type="AnalogueValue_TYPE"/>
+      <BDA name="ang"     bType="Struct"  type="AnalogueValue_TYPE"/>
+    </DAType>
+
+    <DAType id="Unit_TYPE">
+      <BDA name="SIUnit"  bType="Enum"/>
+      <BDA name="multiplier" bType="Enum"/>
+    </DAType>
+
+    <DAType id="ScaledValueConfig_TYPE">
+      <BDA name="scaleFactor" bType="FLOAT32"/>
+      <BDA name="offset"      bType="FLOAT32"/>
+    </DAType>
+
+    <DAType id="RangeConfig_TYPE">
+      <BDA name="hhLim"  bType="Struct"  type="AnalogueValue_TYPE"/>
+      <BDA name="hLim"   bType="Struct"  type="AnalogueValue_TYPE"/>
+      <BDA name="lLim"   bType="Struct"  type="AnalogueValue_TYPE"/>
+      <BDA name="llLim"  bType="Struct"  type="AnalogueValue_TYPE"/>
+      <BDA name="min"    bType="Struct"  type="AnalogueValue_TYPE"/>
+      <BDA name="max"    bType="Struct"  type="AnalogueValue_TYPE"/>
+    </DAType>
+
+    <DAType id="OperDPC_TYPE">
+      <BDA name="ctlVal"  bType="BOOLEAN"/>
+      <BDA name="origin"  bType="Struct"  type="Originator_TYPE"/>
+      <BDA name="ctlNum"  bType="INT8U"/>
+      <BDA name="T"       bType="Timestamp"/>
+      <BDA name="Test"    bType="BOOLEAN"/>
+      <BDA name="Check"   bType="Tcmd"/>
+    </DAType>
+
+    <DAType id="Cancel_TYPE">
+      <BDA name="ctlVal"  bType="BOOLEAN"/>
+      <BDA name="origin"  bType="Struct"  type="Originator_TYPE"/>
+      <BDA name="ctlNum"  bType="INT8U"/>
+      <BDA name="T"       bType="Timestamp"/>
+      <BDA name="Test"    bType="BOOLEAN"/>
+    </DAType>
+
+    <DAType id="Originator_TYPE">
+      <BDA name="orCat"   bType="Enum"/>
+      <BDA name="orIdent" bType="OctetString64"/>
+    </DAType>
+
+    <!-- ============================================================
+         LNodeType definitions
+         ============================================================ -->
+    <LNodeType id="LLN0_TYPE" lnClass="LLN0">
+      <DO name="Mod"    type="ENS_TYPE"/>
+      <DO name="Beh"    type="ENS_TYPE"/>
+      <DO name="Health" type="ENS_TYPE"/>
+      <DO name="NamPlt" type="LPL_TYPE"/>
+    </LNodeType>
+
+    <LNodeType id="MMXU_TYPE" lnClass="MMXU">
+      <DO name="Mod"    type="ENS_TYPE"/>
+      <DO name="Beh"    type="ENS_TYPE"/>
+      <DO name="Health" type="ENS_TYPE"/>
+      <DO name="NamPlt" type="LPL_TYPE"/>
+      <DO name="TotW"   type="MV_TYPE"/>
+      <DO name="TotVAr" type="MV_TYPE"/>
+      <DO name="TotVA"  type="MV_TYPE"/>
+      <DO name="TotPF"  type="MV_TYPE"/>
+      <DO name="Hz"     type="MV_TYPE"/>
+      <DO name="PhV"    type="WYE_TYPE"/>
+      <DO name="A"      type="WYE_TYPE"/>
+      <DO name="W"      type="WYE_TYPE"/>
+      <DO name="VAr"    type="WYE_TYPE"/>
+      <DO name="VA"     type="WYE_TYPE"/>
+      <DO name="PF"     type="WYE_TYPE"/>
+    </LNodeType>
+
+    <LNodeType id="XCBR_TYPE" lnClass="XCBR">
+      <DO name="Mod"    type="ENS_TYPE"/>
+      <DO name="Beh"    type="ENS_TYPE"/>
+      <DO name="Health" type="ENS_TYPE"/>
+      <DO name="NamPlt" type="LPL_TYPE"/>
+      <DO name="Loc"    type="SPS_TYPE"/>
+      <DO name="OpCnt"  type="INS_TYPE"/>
+      <DO name="Pos"    type="DPC_TYPE"/>
+      <DO name="BlkOpn" type="SPS_TYPE"/>
+      <DO name="BlkCls" type="SPS_TYPE"/>
+    </LNodeType>
+
+    <LNodeType id="XSWI_TYPE" lnClass="XSWI">
+      <DO name="Mod"    type="ENS_TYPE"/>
+      <DO name="Beh"    type="ENS_TYPE"/>
+      <DO name="Health" type="ENS_TYPE"/>
+      <DO name="NamPlt" type="LPL_TYPE"/>
+      <DO name="Loc"    type="SPS_TYPE"/>
+      <DO name="OpCnt"  type="INS_TYPE"/>
+      <DO name="Pos"    type="DPC_TYPE"/>
+    </LNodeType>
+
+    <LNodeType id="PDIS_TYPE" lnClass="PDIS">
+      <DO name="Mod"    type="ENS_TYPE"/>
+      <DO name="Beh"    type="ENS_TYPE"/>
+      <DO name="Health" type="ENS_TYPE"/>
+      <DO name="NamPlt" type="LPL_TYPE"/>
+      <DO name="Op"     type="ACD_TYPE"/>
+      <DO name="Str"    type="ACT_TYPE"/>
+      <DO name="Z"      type="MV_TYPE"/>
+      <DO name="RStr"   type="MV_TYPE"/>
+    </LNodeType>
+
+    <LNodeType id="PTOC_TYPE" lnClass="PTOC">
+      <DO name="Mod"    type="ENS_TYPE"/>
+      <DO name="Beh"    type="ENS_TYPE"/>
+      <DO name="Health" type="ENS_TYPE"/>
+      <DO name="NamPlt" type="LPL_TYPE"/>
+      <DO name="Op"     type="ACD_TYPE"/>
+      <DO name="Str"    type="ACT_TYPE"/>
+      <DO name="StrVal" type="MV_TYPE"/>
+      <DO name="StrMul" type="ING_TYPE"/>
+    </LNodeType>
+
+  </DataTypeTemplates>
+
+  <!-- ============================================================
+       IED Definition — Template for one IED (runtime creates 20)
+       ============================================================ -->
+  <IED name="IED01" desc="Protection IED — Template" type="SIMULATOR-PROT" manufacturer="IEC61850-SIM" configVersion="1.0">
+    <Services>
+      <DynAssociation/>
+      <GetDirectory/>
+      <GetDataObjectDefinition/>
+      <DataObjectDirectory/>
+      <GetDataSetValue/>
+      <SetDataSetValue/>
+      <DataSetDirectory/>
+      <ReadWrite/>
+      <GetCBValues/>
+      <GetBRCBValues/>
+      <SetBRCBValues/>
+      <GetURCBValues/>
+      <SetURCBValues/>
+      <Report bufConf="true"/>
+      <ConfDataSet deletable="false" maxAttributes="200" maxDataSets="10"/>
+      <DynDataSet max="10" maxAttributes="200"/>
+      <ConfReportControl bufMode="true" max="10" maxBuf="4" maxBufConf="4"/>
+      <GSESettings maxTime="10000" minTime="10"/>
+      <SMVSettings cbName="false" dataSet="true" svID="true" optFields="true" smpRate="true" nofASDU="true" noOfEntries="false"/>
+      <ConfLNs fixLnInst="true" fixPrefix="true"/>
+      <ClientServices>
+        <ResponseTime/>
+        <ReportSettings cbName="Dyn" datSet="Dyn" rptID="Dyn" optFields="Dyn" bufTime="Dyn" trgOps="Dyn" intgPd="Dyn"/>
+      </ClientServices>
+    </Services>
+
+    <AccessPoint name="S1">
+      <Server>
+        <Authentication/>
+        <LDevice inst="PROT" desc="Protection Logical Device">
+
+          <LN0 lnClass="LLN0" inst="" lnType="LLN0_TYPE" desc="Logical Node Zero">
+            <DataSet name="MeasDS" desc="Measurement Dataset">
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="TotW"   daName="mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="TotVAr" daName="mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="TotVA"  daName="mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="TotPF"  daName="mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="Hz"     daName="mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="PhV"    daName="phsA.cVal.mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="PhV"    daName="phsB.cVal.mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="PhV"    daName="phsC.cVal.mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="A"      daName="phsA.cVal.mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="A"      daName="phsB.cVal.mag.f" fc="MX"/>
+              <FCDA ldInst="PROT" prefix="" lnClass="MMXU" lnInst="1" doName="A"      daName="phsC.cVal.mag.f" fc="MX"/>
+            </DataSet>
+
+            <ReportControl name="brcb01" confRev="1" datSet="MeasDS" rptID="IED01PROT/LLN0.brcb01"
+                           buffered="true" intgPd="1000" indexed="true">
+              <TrgOps dchg="true" qchg="true" period="true" gi="true"/>
+              <OptFields sqNum="true" timeStamp="true" dataSet="true" reasonCode="true"
+                         dataRef="false" entryID="true" configRef="true" bufOvfl="true"/>
+              <RptEnabled max="1"/>
+            </ReportControl>
+
+            <ReportControl name="urcb01" confRev="1" datSet="MeasDS" rptID="IED01PROT/LLN0.urcb01"
+                           buffered="false" intgPd="0" indexed="true">
+              <TrgOps dchg="true" gi="true"/>
+              <OptFields sqNum="true" timeStamp="true" reasonCode="true"/>
+              <RptEnabled max="3"/>
+            </ReportControl>
+          </LN0>
+
+          <LN lnClass="XCBR" inst="1" lnType="XCBR_TYPE" prefix="" desc="Circuit Breaker 1"/>
+          <LN lnClass="XSWI" inst="1" lnType="XSWI_TYPE" prefix="" desc="Disconnector 1"/>
+          <LN lnClass="PDIS" inst="1" lnType="PDIS_TYPE" prefix="" desc="Distance Protection Zone 1"/>
+          <LN lnClass="PTOC" inst="1" lnType="PTOC_TYPE" prefix="" desc="Overcurrent Protection Phase"/>
+          <LN lnClass="MMXU" inst="1" lnType="MMXU_TYPE" prefix="" desc="Measurements Protection Side"/>
+
+        </LDevice>
+
+        <LDevice inst="MEAS" desc="Measurement Logical Device">
+
+          <LN0 lnClass="LLN0" inst="" lnType="LLN0_TYPE" desc="Logical Node Zero">
+            <DataSet name="MeasDS" desc="All Phase Measurements">
+              <FCDA ldInst="MEAS" prefix="" lnClass="MMXU" lnInst="1" doName="TotW"   daName="mag.f" fc="MX"/>
+              <FCDA ldInst="MEAS" prefix="" lnClass="MMXU" lnInst="1" doName="Hz"     daName="mag.f" fc="MX"/>
+              <FCDA ldInst="MEAS" prefix="" lnClass="MMXU" lnInst="1" doName="PhV"    daName="phsA.cVal.mag.f" fc="MX"/>
+              <FCDA ldInst="MEAS" prefix="" lnClass="MMXU" lnInst="2" doName="TotW"   daName="mag.f" fc="MX"/>
+              <FCDA ldInst="MEAS" prefix="" lnClass="MMXU" lnInst="3" doName="TotW"   daName="mag.f" fc="MX"/>
+            </DataSet>
+            <ReportControl name="brcb01" confRev="1" datSet="MeasDS" rptID="IED01MEAS/LLN0.brcb01"
+                           buffered="true" intgPd="1000" indexed="true">
+              <TrgOps dchg="true" period="true" gi="true"/>
+              <OptFields sqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" configRef="true"/>
+              <RptEnabled max="1"/>
+            </ReportControl>
+          </LN0>
+
+          <LN lnClass="MMXU" inst="1" lnType="MMXU_TYPE" prefix="" desc="Three Phase Measurements Ch1"/>
+          <LN lnClass="MMXU" inst="2" lnType="MMXU_TYPE" prefix="" desc="Three Phase Measurements Ch2"/>
+          <LN lnClass="MMXU" inst="3" lnType="MMXU_TYPE" prefix="" desc="Three Phase Measurements Ch3"/>
+
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+</SCL>

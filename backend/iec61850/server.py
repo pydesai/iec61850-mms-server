@@ -1,0 +1,428 @@
+"""
+MmsServer: thread-safe wrapper around pyiec61850 IedServer lifecycle.
+
+Key threading rules (from libIEC61850 docs):
+- IedServer_lockDataModel / IedServer_unlockDataModel required for all
+  value reads/writes from Python threads.
+- Control handler callbacks (ControlHandlerForPython.trigger) run inside
+  libiec61850's internal thread — they must NOT call lock/unlock (deadlock).
+- IedServer_start is synchronous — call from a thread pool, never the event loop.
+"""
+from __future__ import annotations
+import asyncio
+import math
+import random
+import threading
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
+
+import iec61850
+
+from config import ServerConfig
+from state.app_state import AppState
+from state.log_buffer import LogBuffer
+from iec61850.auth import install_password_authenticator
+
+# Simulation value profiles: {do_name_keyword: (base, amplitude, unit)}
+_SIM_PROFILES: dict[str, tuple[float, float]] = {
+    "TotW":   (5000.0, 500.0),
+    "TotVAr": (1200.0, 300.0),
+    "TotVA":  (5200.0, 520.0),
+    "TotPF":  (0.95,   0.03),
+    "Hz":     (50.0,   0.05),
+    "PhV":    (230.0,  5.0),
+    "A":      (100.0,  10.0),
+    "W":      (1500.0, 150.0),
+    "VAr":    (400.0,  80.0),
+    "VA":     (1600.0, 160.0),
+    "PF":     (0.94,   0.03),
+    "SeqA":   (100.0,  5.0),
+    "SeqV":   (230.0,  3.0),
+    "AvAmps": (95.0,   8.0),
+    "AvPPV":  (398.0,  5.0),
+    "AvVolts":(230.0,  4.0),
+    "AvWatts":(4800.0, 480.0),
+}
+
+
+class _ControlHandler(iec61850.ControlHandlerForPython):
+    def __init__(self, ref: str, log: LogBuffer):
+        super().__init__()
+        self._ref = ref
+        self._log = log
+
+    def trigger(self, action, test):
+        self._log.append("INFO", f"Control: {self._ref} action={action} test={test}")
+        return iec61850.CONTROL_RESULT_OK
+
+
+class MmsServer:
+    def __init__(self, app_state: AppState, log_buffer: LogBuffer) -> None:
+        self._state = app_state
+        self._log = log_buffer
+        self._poll_stop = threading.Event()
+        self._poll_thread: Optional[threading.Thread] = None
+        self._sim_thread: Optional[threading.Thread] = None
+        self._control_handlers: list[_ControlHandler] = []
+
+    # ------------------------------------------------------------------
+    # Public API (called from FastAPI routes via asyncio.run_in_executor)
+    # ------------------------------------------------------------------
+
+    def start(
+        self,
+        model: Any,
+        da_cache: dict[str, Any],
+        config: ServerConfig,
+    ) -> None:
+        with self._state._lock:
+            if self._state.ied_server is not None:
+                raise RuntimeError("MMS server is already running")
+
+            srv_config = iec61850.IedServerConfig_create()
+            iec61850.IedServerConfig_setMaxMmsConnections(srv_config, config.max_connections)
+            iec61850.IedServerConfig_setReportBufferSize(srv_config, config.report_buffer_size)
+
+            server = iec61850.IedServer_createWithConfig(model, None, srv_config)
+
+            if config.interface and config.interface != "0.0.0.0":
+                iec61850.IedServer_setLocalIpAddress(server, config.interface)
+
+            iec61850.IedServer_setWriteAccessPolicy(
+                server, iec61850.IEC61850_FC_SP, iec61850.ACCESS_POLICY_ALLOW
+            )
+            iec61850.IedServer_setWriteAccessPolicy(
+                server, iec61850.IEC61850_FC_SV, iec61850.ACCESS_POLICY_ALLOW
+            )
+            iec61850.IedServer_setWriteAccessPolicy(
+                server, iec61850.IEC61850_FC_CF, iec61850.ACCESS_POLICY_ALLOW
+            )
+
+            if config.auth_mode == "password" and config.auth_password:
+                try:
+                    install_password_authenticator(server, config.auth_password)
+                    self._log.append("INFO", "Password authentication enabled")
+                except Exception as exc:
+                    self._log.append("WARN", f"Password auth setup failed: {exc}")
+
+            # Install control handlers for controllable data objects
+            self._install_control_handlers(server, da_cache)
+
+            iec61850.IedServer_start(server, config.port)
+
+            if not iec61850.IedServer_isRunning(server):
+                iec61850.IedServer_destroy(server)
+                raise RuntimeError(
+                    f"Failed to bind MMS server to port {config.port} on "
+                    f"{config.interface}. Is another process using the port?"
+                )
+
+            self._state.ied_server = server
+            self._state.ied_model = model
+            self._state.da_cache = da_cache
+            self._state.start_time = datetime.now(timezone.utc)
+            self._state.config = config
+
+        self._poll_stop.clear()
+        self._poll_thread = threading.Thread(
+            target=self._connection_poll_loop, daemon=True, name="mms-conn-poll"
+        )
+        self._poll_thread.start()
+
+        self._sim_thread = threading.Thread(
+            target=self._value_simulation_loop, daemon=True, name="mms-val-sim"
+        )
+        self._sim_thread.start()
+
+        self._log.append(
+            "INFO",
+            f"MMS server started — interface={config.interface} port={config.port} "
+            f"auth={config.auth_mode} max_conn={config.max_connections}",
+        )
+
+    def stop(self) -> None:
+        with self._state._lock:
+            server = self._state.ied_server
+            if server is None:
+                return
+            self._state.ied_server = None
+            self._state.start_time = None
+
+        self._poll_stop.set()
+
+        iec61850.IedServer_stop(server)
+        iec61850.IedServer_destroy(server)
+        self._control_handlers.clear()
+        self._log.append("INFO", "MMS server stopped")
+
+    def get_status(self) -> dict:
+        with self._state._lock:
+            server = self._state.ied_server
+            if server is None:
+                return {
+                    "running": False,
+                    "connections": 0,
+                    "uptime": None,
+                    "port": self._state.config.port,
+                    "interface": self._state.config.interface,
+                    "scl_source": self._state.scl_source,
+                    "da_count": 0,
+                }
+            conn_count = iec61850.IedServer_getNumberOfOpenConnections(server)
+            return {
+                "running": True,
+                "connections": conn_count,
+                "uptime": self._state.uptime_seconds,
+                "port": self._state.config.port,
+                "interface": self._state.config.interface,
+                "scl_source": self._state.scl_source,
+                "da_count": len(self._state.da_cache),
+            }
+
+    def read_value(self, ref: str) -> Optional[dict]:
+        with self._state._lock:
+            server = self._state.ied_server
+            da = self._state.da_cache.get(ref)
+        if server is None or da is None:
+            return None
+        try:
+            mms_val = iec61850.IedServer_getAttributeValue(server, da)
+            return _mms_value_to_dict(mms_val)
+        except Exception:
+            return None
+
+    def write_value(self, ref: str, value: Any, value_type: Optional[str] = None) -> bool:
+        with self._state._lock:
+            server = self._state.ied_server
+            da = self._state.da_cache.get(ref)
+        if server is None or da is None:
+            return False
+        try:
+            iec61850.IedServer_lockDataModel(server)
+            try:
+                _write_typed_value(server, da, value, value_type)
+            finally:
+                iec61850.IedServer_unlockDataModel(server)
+            self._log.append("INFO", f"Write: {ref} = {value}")
+            return True
+        except Exception as exc:
+            self._log.append("ERROR", f"Write failed: {ref}: {exc}")
+            return False
+
+    def get_device_tree(self) -> list[dict]:
+        with self._state._lock:
+            model = self._state.ied_model
+        if model is None:
+            return []
+        return _extract_device_tree(model)
+
+    def get_connections(self) -> list[dict]:
+        with self._state._lock:
+            server = self._state.ied_server
+        if server is None:
+            return []
+        count = iec61850.IedServer_getNumberOfOpenConnections(server)
+        return [{"id": i, "count": count} for i in range(count)]
+
+    # ------------------------------------------------------------------
+    # Background threads
+    # ------------------------------------------------------------------
+
+    def _connection_poll_loop(self) -> None:
+        prev_count = -1
+        while not self._poll_stop.wait(0.5):
+            with self._state._lock:
+                server = self._state.ied_server
+                if server is None:
+                    break
+                count = iec61850.IedServer_getNumberOfOpenConnections(server)
+
+            if count != prev_count:
+                if prev_count >= 0:
+                    direction = "connected" if count > prev_count else "disconnected"
+                    self._log.append(
+                        "INFO",
+                        f"MMS client {direction} — active connections: {count}",
+                    )
+                self._state.broadcast({
+                    "type": "server_status",
+                    "data": {"running": True, "connections": count},
+                })
+                prev_count = count
+
+    def _value_simulation_loop(self) -> None:
+        t = 0.0
+        while not self._poll_stop.wait(2.0):
+            with self._state._lock:
+                server = self._state.ied_server
+                da_cache = dict(self._state.da_cache)
+
+            if server is None:
+                break
+
+            try:
+                iec61850.IedServer_lockDataModel(server)
+                try:
+                    _simulate_values(server, da_cache, t)
+                finally:
+                    iec61850.IedServer_unlockDataModel(server)
+            except Exception as exc:
+                self._log.append("WARN", f"Value simulation error: {exc}")
+
+            t += 0.1
+
+    def _install_control_handlers(self, server: Any, da_cache: dict) -> None:
+        self._control_handlers = []
+        # Find all controllable DOs by looking for refs ending in common control DAs
+        do_refs_seen: set[str] = set()
+        for ref in da_cache:
+            # Control DOs end with $CO$Oper or $CO$SBO etc.
+            if "$CO$" in ref:
+                # Extract the DO reference (strip $CO$... suffix)
+                parts = ref.split("$")
+                if len(parts) >= 3:
+                    do_ref = "$".join(parts[:-2])  # up to and including DO name
+                    if do_ref not in do_refs_seen:
+                        do_refs_seen.add(do_ref)
+                        try:
+                            node = iec61850.IedModel_getModelNodeByObjectReference(
+                                self._state.ied_model,
+                                do_ref.replace("$", "."),
+                            )
+                            if node:
+                                handler = _ControlHandler(do_ref, self._log)
+                                iec61850.IedServer_setControlHandler(
+                                    server,
+                                    iec61850.toDataObject(node),
+                                    handler,
+                                    None,
+                                )
+                                self._control_handlers.append(handler)
+                        except Exception:
+                            pass
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def _mms_value_to_dict(mms_val: Any) -> Optional[dict]:
+    if mms_val is None:
+        return None
+    try:
+        t = iec61850.MmsValue_getType(mms_val)
+        MMS_BOOLEAN   = iec61850.MMS_BOOLEAN
+        MMS_INTEGER   = iec61850.MMS_INTEGER
+        MMS_UNSIGNED  = iec61850.MMS_UNSIGNED
+        MMS_FLOAT     = iec61850.MMS_FLOAT
+        MMS_VISIBLE_STRING = iec61850.MMS_VISIBLE_STRING
+        MMS_STRING    = iec61850.MMS_STRING
+        MMS_UTC_TIME  = iec61850.MMS_UTC_TIME
+        MMS_BIT_STRING = iec61850.MMS_BIT_STRING
+        MMS_OCTET_STRING = iec61850.MMS_OCTET_STRING
+        MMS_STRUCTURE = iec61850.MMS_STRUCTURE
+
+        if t == MMS_BOOLEAN:
+            return {"type": "BOOLEAN", "value": bool(iec61850.MmsValue_getBoolean(mms_val))}
+        elif t == MMS_INTEGER:
+            return {"type": "INT32", "value": iec61850.MmsValue_toInt32(mms_val)}
+        elif t == MMS_UNSIGNED:
+            return {"type": "UINT32", "value": iec61850.MmsValue_toUint32(mms_val)}
+        elif t == MMS_FLOAT:
+            return {"type": "FLOAT32", "value": round(iec61850.MmsValue_toFloat(mms_val), 6)}
+        elif t in (MMS_VISIBLE_STRING, MMS_STRING):
+            return {"type": "STRING", "value": iec61850.MmsValue_toString(mms_val)}
+        elif t == MMS_UTC_TIME:
+            ms = iec61850.MmsValue_getUtcTimeInMs(mms_val)
+            return {"type": "TIMESTAMP", "value": ms}
+        elif t == MMS_BIT_STRING:
+            bits = iec61850.MmsValue_getBitStringAsInteger(mms_val)
+            return {"type": "BITSTRING", "value": bits}
+        elif t == MMS_STRUCTURE:
+            return {"type": "STRUCTURE", "value": None}
+        else:
+            return {"type": "UNKNOWN", "value": None}
+    except Exception:
+        return {"type": "UNKNOWN", "value": None}
+
+
+def _write_typed_value(server: Any, da: Any, value: Any, value_type: Optional[str]) -> None:
+    mms_val = iec61850.IedServer_getAttributeValue(server, da)
+    if mms_val is None:
+        return
+    t = iec61850.MmsValue_getType(mms_val)
+    MMS_BOOLEAN  = iec61850.MMS_BOOLEAN
+    MMS_INTEGER  = iec61850.MMS_INTEGER
+    MMS_UNSIGNED = iec61850.MMS_UNSIGNED
+    MMS_FLOAT    = iec61850.MMS_FLOAT
+    MMS_VISIBLE_STRING = iec61850.MMS_VISIBLE_STRING
+    MMS_STRING   = iec61850.MMS_STRING
+    MMS_BIT_STRING = iec61850.MMS_BIT_STRING
+
+    if t == MMS_BOOLEAN:
+        iec61850.IedServer_updateBooleanAttributeValue(server, da, bool(value))
+    elif t == MMS_INTEGER:
+        iec61850.IedServer_updateInt32AttributeValue(server, da, int(value))
+    elif t == MMS_UNSIGNED:
+        iec61850.IedServer_updateUnsignedAttributeValue(server, da, int(value))
+    elif t == MMS_FLOAT:
+        iec61850.IedServer_updateFloatAttributeValue(server, da, float(value))
+    elif t in (MMS_VISIBLE_STRING, MMS_STRING):
+        iec61850.IedServer_updateVisibleStringAttributeValue(server, da, str(value))
+    elif t == MMS_BIT_STRING:
+        iec61850.IedServer_updateBitStringAttributeValue(server, da, int(value))
+
+
+def _simulate_values(server: Any, da_cache: dict, t: float) -> None:
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    MMS_FLOAT    = iec61850.MMS_FLOAT
+    MMS_UTC_TIME = iec61850.MMS_UTC_TIME
+    MMS_INTEGER  = iec61850.MMS_INTEGER
+    MMS_BOOLEAN  = iec61850.MMS_BOOLEAN
+
+    for ref, da in da_cache.items():
+        try:
+            mms_val = iec61850.IedServer_getAttributeValue(server, da)
+            if mms_val is None:
+                continue
+            val_type = iec61850.MmsValue_getType(mms_val)
+
+            if val_type == MMS_FLOAT:
+                # Determine simulation profile from reference
+                base, amp = _get_profile(ref)
+                phase = (hash(ref) % 1000) / 1000.0 * 2 * math.pi
+                noise = (random.random() - 0.5) * amp * 0.05
+                val = base + amp * math.sin(t + phase) + noise
+                iec61850.IedServer_updateFloatAttributeValue(server, da, val)
+            elif val_type == MMS_UTC_TIME:
+                iec61850.IedServer_updateUTCTimeAttributeValue(server, da, now_ms)
+        except Exception:
+            continue
+
+
+def _get_profile(ref: str) -> tuple[float, float]:
+    for keyword, (base, amp) in _SIM_PROFILES.items():
+        if keyword in ref:
+            return base, amp
+    return 0.0, 1.0
+
+
+def _extract_device_tree(model: Any) -> list[dict]:
+    devices = []
+    try:
+        ld_node = iec61850.toModelNode(model)
+        child = iec61850.ModelNode_getChild(ld_node, None)
+        while child is not None:
+            if iec61850.ModelNode_getType(child) == 1:  # LogicalDevice
+                ld_name = iec61850.ModelNode_getName(child)
+                lns = []
+                ln_child = iec61850.ModelNode_getChild(child, None)
+                while ln_child is not None:
+                    if iec61850.ModelNode_getType(ln_child) == 2:  # LogicalNode
+                        lns.append(iec61850.ModelNode_getName(ln_child))
+                    ln_child = iec61850.ModelNode_getSibling(ln_child)
+                devices.append({"ld": ld_name, "logical_nodes": lns})
+            child = iec61850.ModelNode_getSibling(child)
+    except Exception:
+        pass
+    return devices

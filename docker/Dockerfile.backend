@@ -1,0 +1,24 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# pyiec61850 requires libgomp1 (OpenMP runtime bundled with GCC)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ .
+
+# Create runtime directories
+RUN mkdir -p /tmp/scl_uploads /tmp/tls_certs
+
+# Port 8000: FastAPI REST + WebSocket
+# Port 102 is mapped at docker-compose level
+EXPOSE 8000
+
+# Single worker — pyiec61850 IedServer cannot be forked across workers
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--log-level", "info"]
