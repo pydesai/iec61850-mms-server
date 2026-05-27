@@ -144,24 +144,40 @@ def _build_da(da: Any, parent_node: Any, do_types: dict[str, ParsedDOType]) -> N
 
 
 def _build_da_cache(model: Any) -> dict[str, Any]:
+    """Best-effort traversal — failures return a partial cache rather than aborting."""
     cache: dict[str, Any] = {}
-    _collect_data_attributes(iec61850.toModelNode(model), cache)
+    try:
+        _collect_data_attributes(iec61850.toModelNode(model), cache)
+    except Exception:
+        pass
     return cache
+
+
+# ModelNodeType: LD=0, LN=1, DO=2, DA=3 (matches libiec61850 model.h)
+_DATA_ATTRIBUTE_TYPE = 3
 
 
 def _collect_data_attributes(node: Any, cache: dict) -> None:
     if node is None:
         return
 
-    DATA_ATTRIBUTE_TYPE = 4
-    node_type = iec61850.ModelNode_getType(node)
+    try:
+        node_type = iec61850.ModelNode_getType(node)
+        if node_type == _DATA_ATTRIBUTE_TYPE:
+            ref = iec61850.ModelNode_getObjectReference(node, None)
+            if ref:
+                cache[ref] = iec61850.toDataAttribute(node)
+    except Exception:
+        return
 
-    if node_type == DATA_ATTRIBUTE_TYPE:
-        ref = iec61850.ModelNode_getObjectReference(node, None)
-        if ref:
-            cache[ref] = iec61850.toDataAttribute(node)
+    try:
+        child = iec61850.ModelNode_getChild(node, None)
+    except Exception:
+        child = None
 
-    child = iec61850.ModelNode_getChild(node, None)
     while child is not None:
         _collect_data_attributes(child, cache)
-        child = iec61850.ModelNode_getSibling(child)
+        try:
+            child = iec61850.ModelNode_getSibling(child)
+        except Exception:
+            break

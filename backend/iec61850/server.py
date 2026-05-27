@@ -45,15 +45,30 @@ _SIM_PROFILES: dict[str, tuple[float, float]] = {
 }
 
 
-class _ControlHandler(iec61850.ControlHandlerForPython):
-    def __init__(self, ref: str, log: LogBuffer):
-        super().__init__()
-        self._ref = ref
-        self._log = log
+# ControlHandlerForPython is a SWIG director class that only exists when
+# libIEC61850 is compiled from source with -DBUILD_PYTHON_BINDINGS=ON. The
+# PyPI pyiec61850 wheel does NOT ship with it. We detect availability at
+# import time and skip server-side control handler installation if missing.
+# Control operations from clients are still accepted by libiec61850 itself;
+# we just don't get a Python callback for each one. The API layer logs
+# operate-requests via the /operate route handler instead.
+_HAS_CONTROL_HANDLER = hasattr(iec61850, "ControlHandlerForPython")
 
-    def trigger(self, action, test):
-        self._log.append("INFO", f"Control: {self._ref} action={action} test={test}")
-        return iec61850.CONTROL_RESULT_OK
+if _HAS_CONTROL_HANDLER:
+    class _ControlHandler(iec61850.ControlHandlerForPython):  # type: ignore[misc]
+        def __init__(self, ref: str, log: LogBuffer):
+            super().__init__()
+            self._ref = ref
+            self._log = log
+
+        def trigger(self, action, test):
+            self._log.append("INFO", f"Control: {self._ref} action={action} test={test}")
+            return getattr(iec61850, "CONTROL_RESULT_OK", 0)
+else:
+    class _ControlHandler:  # noqa: D401 — stub placeholder
+        """Stub used when pyiec61850 wheel does not expose the SWIG director."""
+        def __init__(self, *args, **kwargs):  # pragma: no cover
+            pass
 
 
 class MmsServer:
@@ -63,7 +78,7 @@ class MmsServer:
         self._poll_stop = threading.Event()
         self._poll_thread: Optional[threading.Thread] = None
         self._sim_thread: Optional[threading.Thread] = None
-        self._control_handlers: list[_ControlHandler] = []
+        self._control_handlers: list = []
 
     # ------------------------------------------------------------------
     # Public API (called from FastAPI routes via asyncio.run_in_executor)
@@ -79,24 +94,50 @@ class MmsServer:
             if self._state.ied_server is not None:
                 raise RuntimeError("MMS server is already running")
 
-            srv_config = iec61850.IedServerConfig_create()
-            iec61850.IedServerConfig_setMaxMmsConnections(srv_config, config.max_connections)
-            iec61850.IedServerConfig_setReportBufferSize(srv_config, config.report_buffer_size)
+            # Prefer the newer IedServerConfig API when available; fall back
+            # to the simpler IedServer_create(model) constructor otherwise.
+            server = None
+            if hasattr(iec61850, "IedServerConfig_create"):
+                try:
+                    srv_config = iec61850.IedServerConfig_create()
+                    if hasattr(iec61850, "IedServerConfig_setMaxMmsConnections"):
+                        iec61850.IedServerConfig_setMaxMmsConnections(
+                            srv_config, config.max_connections
+                        )
+                    if hasattr(iec61850, "IedServerConfig_setReportBufferSize"):
+                        iec61850.IedServerConfig_setReportBufferSize(
+                            srv_config, config.report_buffer_size
+                        )
+                    if hasattr(iec61850, "IedServer_createWithConfig"):
+                        server = iec61850.IedServer_createWithConfig(model, None, srv_config)
+                except Exception as exc:
+                    self._log.append(
+                        "WARN", f"IedServerConfig path failed, using simple create: {exc}"
+                    )
+                    server = None
 
-            server = iec61850.IedServer_createWithConfig(model, None, srv_config)
+            if server is None:
+                server = iec61850.IedServer_create(model)
 
-            if config.interface and config.interface != "0.0.0.0":
-                iec61850.IedServer_setLocalIpAddress(server, config.interface)
+            if config.interface and config.interface != "0.0.0.0" and hasattr(
+                iec61850, "IedServer_setLocalIpAddress"
+            ):
+                try:
+                    iec61850.IedServer_setLocalIpAddress(server, config.interface)
+                except Exception as exc:
+                    self._log.append("WARN", f"setLocalIpAddress not supported: {exc}")
 
-            iec61850.IedServer_setWriteAccessPolicy(
-                server, iec61850.IEC61850_FC_SP, iec61850.ACCESS_POLICY_ALLOW
-            )
-            iec61850.IedServer_setWriteAccessPolicy(
-                server, iec61850.IEC61850_FC_SV, iec61850.ACCESS_POLICY_ALLOW
-            )
-            iec61850.IedServer_setWriteAccessPolicy(
-                server, iec61850.IEC61850_FC_CF, iec61850.ACCESS_POLICY_ALLOW
-            )
+            # Write access policy — best-effort
+            for fc_name in ("IEC61850_FC_SP", "IEC61850_FC_SV", "IEC61850_FC_CF"):
+                if hasattr(iec61850, fc_name) and hasattr(iec61850, "ACCESS_POLICY_ALLOW"):
+                    try:
+                        iec61850.IedServer_setWriteAccessPolicy(
+                            server,
+                            getattr(iec61850, fc_name),
+                            iec61850.ACCESS_POLICY_ALLOW,
+                        )
+                    except Exception:
+                        pass
 
             if config.auth_mode == "password" and config.auth_password:
                 try:
@@ -106,7 +147,18 @@ class MmsServer:
                     self._log.append("WARN", f"Password auth setup failed: {exc}")
 
             # Install control handlers for controllable data objects
-            self._install_control_handlers(server, da_cache)
+            # (no-op when pyiec61850 wheel doesn't expose ControlHandlerForPython)
+            if _HAS_CONTROL_HANDLER:
+                try:
+                    self._install_control_handlers(server, da_cache)
+                except Exception as exc:
+                    self._log.append("WARN", f"Control handler install skipped: {exc}")
+            else:
+                self._log.append(
+                    "INFO",
+                    "Control handler callbacks unavailable in this pyiec61850 build "
+                    "— operate requests are still accepted via the REST /operate endpoint.",
+                )
 
             iec61850.IedServer_start(server, config.port)
 

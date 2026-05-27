@@ -241,42 +241,79 @@ def _add_rcbs_and_dataset(parent_ld: Any, lln0: Any, mmxu_name: str) -> None:
 
 def _build_da_cache(model: Any) -> dict[str, Any]:
     """
-    Walk the entire model and collect all DataAttribute references.
-    Returns mapping: reference_string -> DataAttribute node pointer.
+    Walk the entire model and collect all DataAttribute references into a
+    lookup cache. Best-effort: any failure traversing the C model tree
+    returns whatever was collected so far rather than aborting startup.
+
+    The MMS server itself does NOT depend on this cache; it's only used by
+    the REST API for individual data-attribute read/write.
     """
     cache: dict[str, Any] = {}
-    _walk_model_node(iec61850.toModelNode(model), cache, "")
+    try:
+        # Start from the IedModel root and walk each LogicalDevice
+        first_ld = iec61850.IedModel_getFirstChild(model) if hasattr(
+            iec61850, "IedModel_getFirstChild"
+        ) else None
+
+        if first_ld is None:
+            # Fallback to enumerating LDs by index
+            i = 0
+            while True:
+                ld = iec61850.IedModel_getDeviceByIndex(model, i) if hasattr(
+                    iec61850, "IedModel_getDeviceByIndex"
+                ) else None
+                if ld is None:
+                    break
+                _walk_node_safe(iec61850.toModelNode(ld), cache)
+                i += 1
+        else:
+            node = first_ld
+            while node is not None:
+                _walk_node_safe(node, cache)
+                node = _safe_sibling(node)
+    except Exception:
+        # Final fallback: try walking from model as a ModelNode
+        try:
+            _walk_node_safe(iec61850.toModelNode(model), cache)
+        except Exception:
+            pass
+
     return cache
 
 
-def _walk_model_node(node: Any, cache: dict, prefix: str) -> None:
+# ModelNodeType enum (from libiec61850 model.h):
+#   LogicalDeviceModelType = 0
+#   LogicalNodeModelType   = 1
+#   DataObjectModelType    = 2
+#   DataAttributeModelType = 3
+_DATA_ATTRIBUTE_TYPE = 3
+
+
+def _walk_node_safe(node: Any, cache: dict) -> None:
     if node is None:
         return
-
-    child = iec61850.ModelNode_getChild(node, None)
-    # Use the linked list iteration via ModelNode_getChild + siblings
-    # Actually iterate using the model tree walker
-    _collect_data_attributes(node, cache)
-
-
-def _collect_data_attributes(node: Any, cache: dict) -> None:
-    """Recursively collect all DataAttribute nodes into cache."""
-    if node is None:
+    try:
+        node_type = iec61850.ModelNode_getType(node)
+        if node_type == _DATA_ATTRIBUTE_TYPE:
+            ref = iec61850.ModelNode_getObjectReference(node, None)
+            if ref:
+                cache[ref] = iec61850.toDataAttribute(node)
+    except Exception:
         return
-
-    node_type = iec61850.ModelNode_getType(node)
-    # IEC61850_MODEL_NODE_TYPE: 0=IedModel, 1=LogicalDevice, 2=LogicalNode,
-    # 3=DataObject, 4=DataAttribute
-    DATA_ATTRIBUTE_TYPE = 4
-
-    if node_type == DATA_ATTRIBUTE_TYPE:
-        ref = iec61850.ModelNode_getObjectReference(node, None)
-        if ref:
-            da = iec61850.toDataAttribute(node)
-            cache[ref] = da
 
     # Walk children
-    child = iec61850.ModelNode_getChild(node, None)
+    try:
+        child = iec61850.ModelNode_getChild(node, None)
+    except Exception:
+        child = None
+
     while child is not None:
-        _collect_data_attributes(child, cache)
-        child = iec61850.ModelNode_getSibling(child)
+        _walk_node_safe(child, cache)
+        child = _safe_sibling(child)
+
+
+def _safe_sibling(node: Any) -> Any:
+    try:
+        return iec61850.ModelNode_getSibling(node)
+    except Exception:
+        return None
