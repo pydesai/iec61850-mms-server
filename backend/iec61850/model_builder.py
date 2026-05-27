@@ -5,7 +5,7 @@ Returns (IedModel, da_cache) matching the format of default_model.py.
 from __future__ import annotations
 from typing import Any
 
-import iec61850
+import pyiec61850 as iec61850
 from iec61850.scl_parser import ParsedSCL, ParsedLN, ParsedDO, ParsedDOType
 
 CTL_DIRECT = iec61850.CDC_CTL_MODEL_DIRECT_NORMAL
@@ -83,21 +83,31 @@ FC_MAP: dict[str, Any] = {
 
 
 def build_model_from_scl(parsed: ParsedSCL) -> tuple[Any, dict[str, Any]]:
-    model_name = parsed.ieds[0].name if parsed.ieds else "SIMULATOR"
-    model = iec61850.IedModel_create(model_name)
+    # Use empty IedModel name; SCL IED name is baked into LD inst via build_ld below
+    model = iec61850.IedModel_create("")
+
+    expected_refs: list[str] = []
 
     for ied in parsed.ieds:
         for ld in ied.logical_devices:
             ld_key = f"{ied.name}{ld.inst}"
             ld_obj = iec61850.LogicalDevice_create(ld_key, model)
             for ln in ld.logical_nodes:
-                _build_ln(ln, ld_obj, parsed.do_types)
+                ln_refs = _build_ln(ln, ld_obj, parsed.do_types, ld_key)
+                expected_refs.extend(ln_refs)
 
+    # Stash expected refs so _build_da_cache can resolve them
+    _PENDING_DA_REFS[id(model)] = expected_refs
     da_cache = _build_da_cache(model)
     return model, da_cache
 
 
-def _build_ln(ln: ParsedLN, parent_ld: Any, do_types: dict[str, ParsedDOType]) -> None:
+def _build_ln(
+    ln: ParsedLN,
+    parent_ld: Any,
+    do_types: dict[str, ParsedDOType],
+    ld_key: str,
+) -> list[str]:
     ln_name = (ln.prefix or "") + ln.ln_class + (ln.inst or "")
     if ln.ln_class == "LLN0":
         ln_name = "LLN0"
@@ -105,6 +115,7 @@ def _build_ln(ln: ParsedLN, parent_ld: Any, do_types: dict[str, ParsedDOType]) -
     ln_obj = iec61850.LogicalNode_create(ln_name, parent_ld)
     ln_node = iec61850.toModelNode(ln_obj)
 
+    refs: list[str] = []
     for do in ln.data_objects:
         do_type = do_types.get(do.type_ref)
         if do_type is None:
@@ -112,8 +123,13 @@ def _build_ln(ln: ParsedLN, parent_ld: Any, do_types: dict[str, ParsedDOType]) -
         creator = CDC_CREATORS.get(do_type.cdc)
         if creator:
             creator(do.name, ln_node)
+            # Generate expected sub-attribute refs for this CDC
+            do_ref = f"{ld_key}/{ln_name}.{do.name}"
+            for sub in CDC_SUB_ATTRS.get(do_type.cdc, []):
+                refs.append(f"{do_ref}.{sub}")
         else:
             _build_custom_do(do.name, do_type, ln_node, do_types)
+    return refs
 
 
 def _build_custom_do(
@@ -143,41 +159,39 @@ def _build_da(da: Any, parent_node: Any, do_types: dict[str, ParsedDOType]) -> N
     iec61850.DataAttribute_create(da.name, parent_node, mms_type, fc, 0, 0)
 
 
-def _build_da_cache(model: Any) -> dict[str, Any]:
-    """Best-effort traversal — failures return a partial cache rather than aborting."""
-    cache: dict[str, Any] = {}
-    try:
-        _collect_data_attributes(iec61850.toModelNode(model), cache)
-    except Exception:
-        pass
-    return cache
+# CDC sub-attribute templates (shared with default_model)
+from iec61850.default_model import CDC_SUB_ATTRS
 
-
-# ModelNodeType: LD=0, LN=1, DO=2, DA=3 (matches libiec61850 model.h)
 _DATA_ATTRIBUTE_TYPE = 3
 
 
-def _collect_data_attributes(node: Any, cache: dict) -> None:
-    if node is None:
-        return
+def _build_da_cache(model: Any) -> dict[str, Any]:
+    """
+    Use the parsed SCL structure (passed alongside the model) to enumerate
+    every DO ref and resolve its sub-attributes via getModelNodeByObjectReference.
+    This is robust against SWIG walker bugs.
 
-    try:
-        node_type = iec61850.ModelNode_getType(node)
-        if node_type == _DATA_ATTRIBUTE_TYPE:
-            ref = iec61850.ModelNode_getObjectReference(node, None)
-            if ref:
-                cache[ref] = iec61850.toDataAttribute(node)
-    except Exception:
-        return
-
-    try:
-        child = iec61850.ModelNode_getChild(node, None)
-    except Exception:
-        child = None
-
-    while child is not None:
-        _collect_data_attributes(child, cache)
+    For the simplified SCL builder we attach the parsed reference list to the
+    model via a module-level dict; see build_model_from_scl below.
+    """
+    cache: dict[str, Any] = {}
+    refs = _PENDING_DA_REFS.pop(id(model), [])
+    for full_ref in refs:
         try:
-            child = iec61850.ModelNode_getSibling(child)
+            node = iec61850.IedModel_getModelNodeByShortObjectReference(model, full_ref)
+            if node is None:
+                continue
+            try:
+                if iec61850.ModelNode_getType(node) != _DATA_ATTRIBUTE_TYPE:
+                    continue
+            except Exception:
+                pass
+            cache[full_ref] = iec61850.toDataAttribute(node)
         except Exception:
-            break
+            continue
+    return cache
+
+
+# Module-level map: model_id -> list[ref_strings]
+# Populated by build_model_from_scl, consumed by _build_da_cache
+_PENDING_DA_REFS: dict[int, list[str]] = {}
