@@ -22,13 +22,15 @@ def _get_lib() -> ctypes.CDLL:
     if _lib is not None:
         return _lib
 
-    import iec61850 as _iec61850_mod
+    import pyiec61850 as _iec61850_mod
     mod_dir = os.path.dirname(_iec61850_mod.__file__)
 
     # Find the compiled .so — name varies by Python version and arch
     patterns = [
         os.path.join(mod_dir, "_iec61850*.so"),
         os.path.join(mod_dir, "_iec61850*.pyd"),
+        # pyiec61850 wheel layout: libiec61850-*.so lives in pyiec61850.libs/
+        os.path.join(os.path.dirname(mod_dir), "pyiec61850.libs", "libiec61850-*.so*"),
     ]
     for pattern in patterns:
         matches = glob.glob(pattern)

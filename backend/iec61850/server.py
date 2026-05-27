@@ -16,7 +16,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-import iec61850
+import pyiec61850 as iec61850
 
 from config import ServerConfig
 from state.app_state import AppState
@@ -169,6 +169,11 @@ class MmsServer:
                     f"{config.interface}. Is another process using the port?"
                 )
 
+            # Initialize ctlModel on all DPC/SPC/INC controllable DOs so that
+            # MMS clients see a non-zero control model and can call select/operate.
+            # CDC_DPC_create does NOT auto-set ctlModel — we must write it.
+            _init_control_models(server, da_cache, self._log)
+
             self._state.ied_server = server
             self._state.ied_model = model
             self._state.da_cache = da_cache
@@ -262,11 +267,28 @@ class MmsServer:
             return False
 
     def get_device_tree(self) -> list[dict]:
+        """
+        Derive the device tree from da_cache keys. Each key is formatted as
+        'LD/LN.DO.subattr' so we can extract (LD, LN) pairs without any C
+        API walker (which segfaults on void* iteration in this SWIG wheel).
+        """
         with self._state._lock:
-            model = self._state.ied_model
-        if model is None:
+            cache = self._state.da_cache
+        if not cache:
             return []
-        return _extract_device_tree(model)
+
+        ld_to_lns: dict[str, set[str]] = {}
+        for ref in cache:
+            if "/" not in ref or "." not in ref:
+                continue
+            ld_part, rest = ref.split("/", 1)
+            ln_part = rest.split(".", 1)[0]
+            ld_to_lns.setdefault(ld_part, set()).add(ln_part)
+
+        return [
+            {"ld": ld, "logical_nodes": sorted(lns)}
+            for ld, lns in sorted(ld_to_lns.items())
+        ]
 
     def get_connections(self) -> list[dict]:
         with self._state._lock:
@@ -452,6 +474,36 @@ def _simulate_values(server: Any, da_cache: dict, t: float) -> None:
             continue
 
 
+def _init_control_models(server: Any, da_cache: dict, log) -> None:
+    """
+    Write ctlModel = SBO_ENHANCED for DPC objects (XCBR.Pos, XSWI.Pos) so
+    clients see ctlModel != 0 and can perform select/operate. libIEC61850's
+    CDC_DPC_create does not initialize this attribute.
+    """
+    SBO_ENHANCED = 4   # CDC_CTL_MODEL_SBO_ENHANCED
+    DIRECT_NORMAL = 1  # CDC_CTL_MODEL_DIRECT_NORMAL
+
+    count = 0
+    for ref, da in da_cache.items():
+        if not ref.endswith(".ctlModel"):
+            continue
+        # Heuristic: DPC.Pos uses SBO enhanced; SPC/INC default to direct normal
+        do_path = ref.rsplit(".", 1)[0]  # strip ".ctlModel"
+        model_val = SBO_ENHANCED if ".Pos" in do_path else DIRECT_NORMAL
+        try:
+            iec61850.IedServer_lockDataModel(server)
+            try:
+                iec61850.IedServer_updateInt32AttributeValue(server, da, model_val)
+            finally:
+                iec61850.IedServer_unlockDataModel(server)
+            count += 1
+        except Exception:
+            continue
+
+    if count:
+        log.append("INFO", f"Initialized ctlModel on {count} controllable DOs")
+
+
 def _get_profile(ref: str) -> tuple[float, float]:
     for keyword, (base, amp) in _SIM_PROFILES.items():
         if keyword in ref:
@@ -460,21 +512,41 @@ def _get_profile(ref: str) -> tuple[float, float]:
 
 
 def _extract_device_tree(model: Any) -> list[dict]:
-    devices = []
+    """
+    Build the device tree from the model.
+
+    Uses IedModel_getLogicalDeviceCount + IedModel_getDeviceByIndex which
+    DO accept an IedModel; the broken void* walker would require
+    toModelNode(model), which the SWIG wheel rejects.
+    """
+    devices: list[dict] = []
     try:
-        ld_node = iec61850.toModelNode(model)
-        child = iec61850.ModelNode_getChild(ld_node, None)
-        while child is not None:
-            if iec61850.ModelNode_getType(child) == 1:  # LogicalDevice
-                ld_name = iec61850.ModelNode_getName(child)
-                lns = []
-                ln_child = iec61850.ModelNode_getChild(child, None)
-                while ln_child is not None:
-                    if iec61850.ModelNode_getType(ln_child) == 2:  # LogicalNode
-                        lns.append(iec61850.ModelNode_getName(ln_child))
-                    ln_child = iec61850.ModelNode_getSibling(ln_child)
-                devices.append({"ld": ld_name, "logical_nodes": lns})
-            child = iec61850.ModelNode_getSibling(child)
+        count = iec61850.IedModel_getLogicalDeviceCount(model)
     except Exception:
-        pass
+        return devices
+
+    for i in range(count):
+        try:
+            ld = iec61850.IedModel_getDeviceByIndex(model, i)
+            if ld is None:
+                continue
+            ld_node = iec61850.toModelNode(
+                iec61850.LogicalDevice_getLogicalNode(ld, "LLN0")
+            ) if iec61850.LogicalDevice_getLogicalNode(ld, "LLN0") else None
+            ld_name = iec61850.ModelNode_getName(ld_node).split(".")[0] if ld_node else f"LD{i}"
+        except Exception:
+            continue
+
+        # We don't have an "LN by index" call; the names we built are known.
+        # Use known LN sets per LD-suffix.
+        if ld_name.endswith("PROT"):
+            lns = ["LLN0", "XCBR1", "XSWI1", "PDIS1", "PTOC1", "MMXU1"]
+        elif ld_name.endswith("MEAS"):
+            lns = ["LLN0", "MMXU1", "MMXU2", "MMXU3", "MSQI1", "MSTA1"]
+        else:
+            lns = ["LLN0"]
+        # Filter to LNs that actually exist (defensive)
+        lns = [n for n in lns if iec61850.LogicalDevice_getLogicalNode(ld, n)]
+        devices.append({"ld": ld_name, "logical_nodes": lns})
+
     return devices
